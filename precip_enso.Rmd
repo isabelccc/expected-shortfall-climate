@@ -1,0 +1,485 @@
+---
+title: "Research"
+author: "xiulin Chen"
+date: "2024-04-05"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+
+
+
+
+# Precipitation 
+
+
+
+
+
+```{r}
+set.seed(123)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(quantreg)
+library(broom)
+library(scales)
+library(maps)
+library(ggpubr)
+library(gridExtra)
+library(cowplot)
+
+```
+
+```{r}
+
+load("tpr_enso_nao.rData")
+load("lonlat.rData")
+load('tpe_dat.rData')
+tpr_temp <-tpr_enso_nao
+tpe_precip <-tpe_dat
+
+start_year <-1940  # start from 1939 dec
+end_year <- 2015
+
+
+# 1940dec -- 2015nov
+
+start.index <- which(tpe_precip$y == start_year-1 & tpe_precip$m == 12)
+end.index <- which(tpe_precip$y == end_year & tpe_precip$m == 11)
+tpe_precip<-tpe_dat[start.index:end.index,]
+tpe_precip<-tpe_precip|>
+  mutate(enso_year = enso*y,
+         nao_year = nao*y,
+         enso.year1855 = enso*(y-1855),
+         enso.year2015 = enso*(y-2015),
+         nao.year1855 = nao*(y-1855),
+         nao.year2015 = nao*(y-2015))|>
+         mutate(year = ifelse(m == 12, y + 1, y)) #make dec of previous year to next year winter
+
+tpe_precip_wt <- tpe_precip %>% filter(season == 1) #
+tpe_precip_wt
+tpe_precip_sp  <- tpe_precip %>% filter(season == 2)
+tpe_precip_sum <- tpe_precip %>% filter(season == 3)
+tpe_precip_fall <- tpe_precip %>% filter(season == 4)
+
+
+
+```
+
+```{r}
+
+ 
+```
+
+```{r}
+library(car)
+tpe_precip_779 <- tpe_precip|>
+  select(S779,year,season)|>
+  filter(season == 4)
+
+X <- model.matrix(~year , data = tpe_precip_779)
+Y <- tpe_precip_779$S779
+# Create the design matrix X correctly
+
+
+
+Z_loss <- function(X, Y, alpha) {
+  
+  n <- nrow(X)
+  beta <- coef(rq.fit(x= X, y= Y, tau = alpha, method = "pfn"))
+  I <- as.numeric(Y <= X %*% beta)
+  Z <- (I * Y - (I - alpha) * X %*% beta)/alpha
+  return(Z)
+}
+
+
+theta_fit <- function(X, Y, negate = FALSE,tau,fun = Z_loss) {
+  if (negate == TRUE) {
+    X <- -X
+    Y <- -Y
+    alpha = 1-tau
+  }
+  else{
+    alpha = tau
+  }
+ 
+  Z_loss_vector <- fun(X, Y, alpha)
+  joint_model <- lm(Z_loss_vector ~ X-1)
+  theta <- coef(joint_model)
+  return(theta)
+  
+}
+
+
+#get CI 
+theta_CI <- function(X, Y,negate = FALSE, tau) {
+
+  if (negate == TRUE) {
+    X <- -X
+    Y <- -Y
+    alpha = 1-tau
+  }
+  else{
+    alpha = tau
+  }
+  n <- nrow(X)
+ 
+  
+  rq_model <- rq.fit(x= X, y= Y, tau = alpha, method = "pfn")
+  beta_hat <- coef(rq_model)
+ 
+  Z_loss_vector <- Z_loss(X, Y, alpha)
+  joint_model <- lm(Z_loss_vector ~ X - 1)
+  theta_hat <- coef(joint_model)
+  I <- as.numeric(Y<= X%*%beta_hat)
+  residuals <- Y-X%*%beta_hat
+  omega_hat <- residuals*I + alpha * (X %*% (beta_hat - theta_hat))
+  Sigma_hat <- (1 / n) * t(X) %*% X
+  Omega_hat <- (1 / n) * t(X)%*%diag(as.vector(omega_hat^2))%*%X
+  sandwich_var <- solve(Sigma_hat) %*% Omega_hat %*% solve(Sigma_hat)
+  robust_se <- sqrt(diag(sandwich_var))/(sqrt(n))
+  z_alpha <- qnorm(0.975)/alpha    #for alpha = 0.05 significance
+  conf_intervals_lower <- theta_hat - z_alpha * robust_se
+  conf_intervals_upper <- theta_hat + z_alpha * robust_se
+  conf_intervals <- cbind(conf_intervals_lower, conf_intervals_upper)
+
+  return(conf_intervals)
+}
+
+
+
+theta_10<-theta_fit(X,Y,FALSE,0.1)
+
+theta_90<-theta_fit(X,Y,TRUE,0.9)
+
+
+
+
+theta_CI(X,Y,FALSE,0.1)
+theta_CI(X,Y,TRUE,0.9)
+
+
+
+```
+
+```{r}
+
+
+
+
+
+```
+
+
+```{r}
+# linear regression four seasons 
+season_names <- c('Winter', 'Spring', 'Summer', 'Autumn', 'Whole Year')
+pattern <- "^S[0-9]+$"
+seasonal_data <- list(
+  Winter = tpe_precip %>% filter(season == 1),
+  Spring = tpe_precip %>% filter(season == 2),
+  Summer = tpe_precip %>% filter(season == 3),
+  Autumn = tpe_precip %>% filter(season == 4),
+  'Whole Year' = tpe_precip
+)
+
+# change the variable to get Year Coefficient or ENSO Coefficient
+LM_Process <- function(data_df, lonlat,variable) {
+    
+    dataset_results <- data.frame(Model = character(), p.value = numeric(), Coefficient = numeric(), 
+                                  Significance = character(), stringsAsFactors = FALSE)
+    
+    for (s_col in grep(pattern, colnames(data_df), value = TRUE)) {
+        model <- lm(as.formula(paste(s_col, "~ year+enso")), data = data_df)
+        tidy_model <- broom::tidy(model) %>% filter(term == variable)
+        tidy_model$Location <- s_col
+        tidy_model$Significance <- ifelse(tidy_model$p.value < 0.05, "Sig_at_005", "Non_sig")
+        tidy_model$Coefficient <-tidy_model$estimate
+        
+        dataset_results <- rbind(dataset_results, tidy_model[, c("p.value", "Coefficient", "Location", "Significance")])
+    }
+    
+    significant_results <- dataset_results %>%cbind(lonlat) %>%
+                           filter(Significance == "Sig_at_005") 
+                          
+    
+    return(significant_results)
+}
+
+LM_Process(seasonal_data[[1]], lonlat, "year")
+
+```
+
+
+
+
+
+```{r}
+ES_Process <- function(data_df, lonlat, alpha, negate,variable) {
+    dataset_results <- data.frame(Model = character(),
+                                  Significance = character(),
+                                  CI_lower = numeric(),
+                                  CI_upper = numeric(),
+                                  Coefficient = numeric(),
+                                  stringsAsFactors = FALSE)
+  
+        
+        if(variable == "year"){
+          k <- 2
+        }
+        else if(variable == "enso"){
+          k <- 3
+        }
+      
+     for (s_col in grep(pattern, colnames(data_df), value = TRUE)) {
+        X <- model.matrix(~ year+enso, data_df) 
+        Y <- data_df[[s_col]]
+        
+      
+        suppressWarnings({
+          
+        coefficient <- theta_fit(X,Y,negate,alpha)
+        CI <- theta_CI(X, Y, negate, alpha)})
+        CI_lower = sprintf("%.4f",CI[k,1])
+        CI_upper = sprintf("%.4f",CI[k,2])
+        
+
+        significance <- ifelse(CI_lower<= 0 && CI_upper >= 0, "Non_sig", "Sig_at_005")
+        dataset_results <- rbind(dataset_results, data.frame(
+            Model = s_col, 
+            Significance = significance,
+            CI_lower = CI_lower,
+            CI_upper = CI[k,2],
+            Coefficient = coefficient[k]
+        ))
+    }
+    
+    significant_results <- dataset_results %>%
+                           cbind(lonlat)
+    
+    return(significant_results)
+}
+
+# Example usage
+summer <- seasonal_data[[3]]
+ES_Process(seasonal_data[[3]], lonlat, 0.1, FALSE,"year")
+
+ 
+  
+
+```
+
+
+```{r}
+states <- map_data('state')
+cb.tele <- 8
+lm_results <- list()
+ES_results_01 <-list()
+ES_results_09 <-list()
+precip_plots <- list()
+
+color_scale <- c(0, 0.25, 0.33, 0.38, 0.43, 0.5, 0.57, 0.62, 0.67, 0.75, 1) 
+
+
+  # Create plot for each significant dataset
+  create_plot <- function(data, title) {
+    gg_precip <- ggplot(data, aes(x = lon, y = lat, fill = Coefficient)) +
+        geom_tile(alpha = 1) +
+        scale_fill_gradientn(colours = c(
+              "#002c64",
+              "#0065b0",
+              "#0096c7",
+              "#70b6cc",
+              "#cae6f1",
+              "#f8f8f8",
+              "#ffdec8",
+              "#ffa881",
+              "#f55f4c",
+              "#cf1128",
+              "#7a001a"
+            ),
+        values = color_scale,
+        limits = c(-8,8), 
+        guide = "none") +
+         geom_polygon(data = states, aes(x = long, y = lat, group = group),
+                   color = "black", fill = NA, linetype = "dashed", size = 0.3) +
+      coord_fixed(1.3) +
+      theme(
+            legend.position = "none",
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            axis.title.y = element_blank(),
+            axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            panel.border = element_rect(
+              colour = "#a7a7a6",
+              fill = NA,
+              size = 1
+            ),
+            legend.key.height = unit(1, 'cm'),
+            legend.key.width = unit(8, "cm"),
+            plot.title = element_text(size = 22)
+      )+ggtitle(title)
+    gg_precip
+  }
+  
+plot_index<- 1
+  
+for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    ES_results_01[[name]]<-ES_Process(seasonal_data[[i]], lonlat,0.1,FALSE,"enso") # change the name of last variable to get its coefficient
+    plot_title <- paste("(",letters[i],")",season,", ES 0.1, ", nrow(ES_results_01[[name]]))
+    precip_plots[[plot_index]] <- create_plot(ES_results_01[[name]], plot_title)
+    plot_index <- plot_index + 1
+}
+
+for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    lm_results[[name]] <- LM_Process(seasonal_data[[i]], lonlat,"enso")
+    plot_title <- paste("(",letters[i+5],")",season,", LM, ", nrow(lm_results[[name]]))
+    precip_plots[[plot_index]] <- create_plot(lm_results[[name]], plot_title)
+    plot_index <- plot_index + 1
+}
+
+  for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    ES_results_09[[name]]<-ES_Process(seasonal_data[[i]], lonlat,0.9,TRUE,"enso")
+    plot_title <- paste("(",letters[i+10],")",season,", ES 0.9, ", nrow(ES_results_09[[name]]))
+    precip_plots[[plot_index]] <- create_plot( ES_results_09[[name]], plot_title)
+    plot_index <- plot_index + 1
+  }
+  
+ 
+  
+```
+
+
+```{r}
+
+library(ggplot2)
+library(grid)
+library(gtable)
+
+df <- data.frame(
+  x = runif(100, -100, 100),
+  y = runif(100, -50, 50),
+  coef = rnorm(100, 0, cb.tele)  
+) 
+
+ legend_precip <- ggplot(df, aes(x, y, fill = coef)) +
+  geom_tile() +
+   scale_fill_gradientn(
+            limits = c(-cb.tele, cb.tele),
+            colours = c(
+              "#002c64",
+              "#0065b0",
+              "#0096c7",
+              "#70b6cc",
+              "#cae6f1",
+              "#f8f8f8",
+              "#ffdec8",
+              "#ffa881",
+              "#f55f4c",
+              "#cf1128",
+              "#7a001a"
+            ),
+            values = c(0, 0.25, 0.33, 0.38, 0.43, 0.5, 0.57, 0.62, 0.67, 0.75, 1),
+            guide = "colourbar"
+            
+          )+guides(fill = guide_colorbar(title = "Coefficient", title.position = "left", title.hjust = 0.4))+
+    theme(
+    legend.position = "bottom",
+    legend.key.height = unit(1, 'cm'),
+    legend.key.width = unit(8, "cm"),
+    legend.text = element_text(size = 12)
+  )
+ gt <- ggplotGrob(legend_precip)
+legend<- gtable_filter(gt, "guide-box")
+
+
+
+
+
+combined_plot <- plot_grid(plotlist = precip_plots, align = 'hv', nrow = 3, ncol = 5)
+final_plot <- plot_grid(
+    combined_plot, 
+    legend,          
+    nrow = 2,       
+    rel_heights = c(1.5, 0.2) 
+)+theme(plot.margin = unit(c(0.8, 0.2, 0.8, 0.2), "cm"))
+
+
+ggsave("figure9(upper).pdf", final_plot, width = 25, height = 11, device = "pdf",limitsize = FALSE)
+
+
+
+
+
+```
+
+
+```{r}
+
+  
+ 
+```
+
+
+
+```{r}
+
+
+
+
+
+X <- model.matrix(~year , data = tpe_precip_779)
+Y <- tpe_precip_779$S779
+
+quan10<-rq(S779~year, data = tpe_precip_779,tau = 0.1,method = "pfn")
+summary(quan10)
+
+
+linear_m <-lm(S779~year, data = tpe_precip_779)
+summary(linear_m)
+coef(linear_m)
+tpe_precip_779|>
+  ggplot(aes(x= year, y =S779))+geom_point(size = 0.5, color = "#0065b0")+
+  geom_abline(intercept =  42.01524   , slope = -0.01890   , color = "black", linetype = "dashed")+
+  geom_abline(intercept =  38.27239176, slope = -0.01764639   , color = "black")+
+  geom_abline(intercept =  -76.16250, slope = 0.04687    , color = "black", linetype = "dashed")+
+  geom_abline(intercept =  -39.25965710 , slope = 0.02494794, color = "black")+
+  geom_abline(intercept = -204.3385865 , slope =  0.1134078, color = "red")+
+  annotate("text", x = 1980, y = 21, label = "90% ES",angle = 12, color = "black") +
+  annotate("text", x = 1980, y = 17.4, label = "90% Quantile",angle = 5.7, color = 'black') +
+  annotate("text", x = 1980, y = 10.8, label = "Linear Regression", angle = 3,color = "black") +
+  annotate("text", x = 1980, y = 5.3, label = "10% ES", angle = -2,color = "black") +
+  annotate("text", x = 1980, y = 2.6, label = "90% ES",angle = -2,color = "black")+
+  labs(y= "Monthly Precipitation", x = "Year")
+  
+  
+
+
+ 
+```
+
+```{r}
+
+
+
+
+```
+
+```{r}
+
+```
+
+
+
+

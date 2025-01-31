@@ -1,0 +1,370 @@
+---
+title: "ENSO-Temperature"
+author: "xiulin Chen"
+date: "2024-05-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+set.seed(123)
+library(readr)
+library(dplyr)
+library(quantreg)
+library(broom)
+library(scales)
+library(maps)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(grid)
+library(gtable)
+load("tpr_enso_nao.rData")
+load("lonlat.rData")
+tpr_temp <-tpr_enso_nao
+
+```
+
+```{r}
+#This is for temperature-enso data analysis
+start_year <-1989#ie:start from 1939 Dec, this input start year should be 1940 
+end_year <- 2015
+
+# 1939 Dec -- 2015 Nov
+start.index <- which(tpr_temp$y == start_year-1 & tpr_temp$m == 12)
+end.index <- which(tpr_temp$y == end_year & tpr_temp$m == 11)
+tpr_temp<-tpr_temp[start.index:end.index,]
+
+tpr_temp<-
+  tpr_temp|>
+  mutate(year = ifelse(m == 12, y + 1, y)) #rejoin Dec from previous year to next year winter
+
+# remove irrelevant variables,only show temp data
+temp_data<-tpr_temp %>%
+  ungroup()|>
+  select(3:823,"year")
+
+
+```
+
+```{r}
+#Two-step short-Fall Expected Regression Helper 
+Z_loss <- function(X, Y, alpha) {
+  n <- nrow(X)
+  beta <- coef(rq.fit(x= X, y= Y, tau = alpha, method = "pfn"))
+  I <- as.numeric(Y <= X %*% beta) #indicator function
+  Z <- (I * Y - (I - alpha) * X %*% beta)/alpha
+  return(Z)
+}
+
+
+theta_fit <- function(X, Y, upper_tail = FALSE,tau,fun = Z_loss) {
+  if (upper_tail == TRUE) {
+    X <- -X
+    Y <- -Y
+    alpha = 1-tau
+  }
+  else{
+    alpha = tau
+  }
+ 
+  Z_loss_vector <- fun(X, Y, alpha)
+  joint_model <- lm(Z_loss_vector ~ X - 1) #remove intercept.
+  theta <- coef(joint_model)
+  return(theta)
+  
+}
+
+#get Confidence Interval for theta
+theta_CI <- function(X, Y,upper_tail = FALSE, tau) {
+  theta_hat <- theta_fit(X,Y,upper_tail,tau,Z_loss)
+  if (upper_tail == TRUE) {
+    X <- -X
+    Y <- -Y
+    alpha = 1-tau
+  }
+  else{
+    alpha = tau
+  }
+  n <- nrow(X)
+  rq_model <- rq.fit(x= X, y= Y, tau = alpha, method = "pfn")
+  beta_hat <- coef(rq_model)
+  I <- as.numeric(Y<= X%*%beta_hat)
+  residuals <- Y-X%*%beta_hat
+  omega_hat <- residuals*I + alpha * (X %*% (beta_hat - theta_hat))
+  Sigma_hat <- (1 / n) * t(X) %*% X
+  Omega_hat <- (1 / n) * t(X)%*%diag(as.vector(omega_hat^2))%*%X
+  sandwich_var <- solve(Sigma_hat) %*% Omega_hat %*% solve(Sigma_hat)
+  robust_se <- sqrt(diag(sandwich_var))/(sqrt(n))
+  z_alpha <- qnorm(0.975)/alpha    #for significance level 0.05
+  conf_intervals_lower <- theta_hat - z_alpha * robust_se
+  conf_intervals_upper <- theta_hat + z_alpha * robust_se
+  conf_intervals <- cbind(conf_intervals_lower, conf_intervals_upper)
+
+  return(conf_intervals)
+}
+
+```
+
+```{r}
+#Linear regression helper function 
+temp_data %>% filter(season == 1)|>select(819)
+
+season_names <- c('Winter,', 'Spring,', 'Summer,', 'Autumn,', 'Whole Year,')
+seasonal_data <- list(
+  Winter = temp_data %>% filter(season == 1),
+  Spring = temp_data %>% filter(season == 2),
+  Summer = temp_data %>% filter(season == 3),
+  Autumn = temp_data %>% filter(season == 4),
+  "Whole Year" = temp_data
+)
+
+LM_Process <- function(data_df, lonlat,variable) {
+    
+   dataset_results <- data.frame(Location = character(), p_value = numeric(), 
+                                  Coefficient = numeric(), Significance = character(),
+                                   stringsAsFactors = FALSE)
+
+    cols <- data_df|>select(1:819)#select data for all locations
+    for (s_col in colnames(cols)) {
+        model <- lm(data_df[[s_col]]~ year+enso, data = data_df)
+        coef_summary <- summary(model)$coefficients
+        var_pvalue <- round(coef_summary[variable, "Pr(>|t|)"],3)
+        var_estimate <- coef_summary[variable, "Estimate"]
+        significance <- if (var_pvalue < 0.05) "Sig_at_005" else "Non_sig"
+    
+        dataset_results <- rbind(dataset_results, tibble(
+            Location = s_col, p_value = var_pvalue, Coefficient = var_estimate,
+            Significance = significance
+        ))
+    }
+    
+    significant_results <- cbind(dataset_results, lonlat)
+    significant_results <- significant_results[significant_results$Significance == "Sig_at_005", ]
+    return(significant_results)
+}
+
+LM_Process(seasonal_data[[1]], lonlat,"year") #example usage,for Winter & enso parameter，
+#lonlat is dataset of locations
+```
+
+
+```{r}
+#Expected Short-Fall Regression Helper Function 
+
+ES_Process <- function(data_df, lonlat, alpha, upper_tail,variable) {
+    dataset_results <- data.frame(Model = character(),
+                                  Significance = character(),
+                                  CI_lower = numeric(),
+                                  CI_upper = numeric(),
+                                  Coefficient = numeric(),
+                                  stringsAsFactors = FALSE)
+  
+        if(variable == "year"){
+          k <- 2
+        }
+        else if(variable == "enso"){
+          k <- 3
+        }
+      
+    cols <- data_df|>select(1:819)
+     for (s_col in colnames(cols)) {
+        X <- model.matrix(~ year+enso, data_df) 
+        Y <- data_df[[s_col]]
+        
+        suppressWarnings({
+        coefficient <- theta_fit(X,Y,upper_tail,alpha)
+        CI <- theta_CI(X, Y, upper_tail, alpha)})
+        CI_lower = round(CI[k,1],3)
+        CI_upper = round(CI[k,2],3)
+
+        significance <- ifelse(CI_lower<= 0 && CI_upper >= 0, "Non_sig", "Sig_at_005")
+        dataset_results <- rbind(dataset_results, data.frame(
+            Location = s_col, 
+            Significance = significance,
+            CI_lower = CI_lower,
+            CI_upper = CI_upper,
+            Coefficient = coefficient[k]
+        ))
+    }
+    
+    significant_results <- dataset_results %>%
+                           cbind(lonlat)|>filter(Significance =="Sig_at_005")
+    
+    return(significant_results)
+}
+
+# Example usage, for winter 0.1 percentile ,lower tail, parameter is year
+ES_Process(seasonal_data[[1]], lonlat, 0.1, FALSE,"year")
+ES_Process(seasonal_data[[1]], lonlat, 0.9, TRUE,"year")
+
+
+
+
+```
+
+
+```{r}
+
+
+border_value <- 4 # #change this border_value to adjust legend scale and range
+df <- data.frame(
+  x = runif(100, -100, 100),
+  y = runif(100, -50, 50),
+  coef = rnorm(100, 0, border_value)  
+) 
+color_scale <-c(0,0.125,0.25,0.43,0.5,0.57,0.75,0.875,1)         
+             
+states <- map_data('state')
+
+
+
+
+# create plot 
+ create_plot <- function(data, title) {
+    gg_temp <- ggplot(data, aes(x = lon, y = lat, fill = Coefficient)) +
+        geom_tile(alpha = 1) +
+        scale_fill_gradientn(colours =c(
+              "#002c64",
+              "#0065b0",
+              "#0096c7",
+              "#70b6cc",
+              "#f8f8f8",
+              "#ffa881",
+              "#f55f4c",
+              "#cf1128",
+              "#7a001a"
+            ),
+        values = color_scale,
+        limits = c(-border_value,border_value), 
+        guide = "none") +
+         geom_polygon(data = states, 
+                      aes(x = long, y = lat, group = group),
+                      color = "black", fill = NA,linetype = "dotted",linewidth = 0.75) +
+      coord_fixed(1.3) +
+      theme(
+            legend.position = "none",
+            panel.background = element_rect(fill = '#eeeeee', colour = "white"),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            axis.title.y = element_blank(),
+            axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            panel.border = element_rect(
+              colour = "#a7a7a6",
+              fill = NA,
+              linewidth = 1
+            ),
+            legend.key.height = unit(1.2, 'cm'),
+            legend.key.width = unit(10, "cm"),
+            plot.title = element_text(size = 22)
+      )+ggtitle(title)
+    gg_temp
+  }
+  
+
+
+temp_plots <- list()
+plot_index <- 1 
+process_and_plot <- function(parameter) {
+ # Initialize a counter for plot indexing
+
+  # Process with ES_Process at alpha = 0.1
+  for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    results <- ES_Process(seasonal_data[[i]], lonlat, 0.1, FALSE, parameter)
+    plot_title <- paste("(", letters[plot_index], ")", season, "ES(0.1),", nrow(results))
+    temp_plots[[plot_index]] <- create_plot(results, plot_title)
+    plot_index <- plot_index + 1
+  }
+
+  # Process with LM_Process
+  for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    results <- LM_Process(seasonal_data[[i]], lonlat, parameter)
+    plot_title <- paste("(", letters[i+5], ")", season,"LM,", nrow(results))
+    temp_plots[[plot_index]] <- create_plot(results, plot_title)
+    plot_index <- plot_index + 1
+  }
+
+  # Process with ES_Process at alpha = 0.9
+  for (i in seq_along(seasonal_data)) {
+    name <- names(seasonal_data)[i]
+    season <- season_names[i]
+    results <- ES_Process(seasonal_data[[i]], lonlat, 0.9, TRUE, parameter)
+    plot_title <- paste("(", letters[i+10], ")", season, "ES(0.9),", nrow(results))
+    temp_plots[[plot_index]] <- create_plot(results, plot_title)
+    plot_index <- plot_index + 1
+  }
+
+  return(temp_plots)
+}
+
+#put indicated parameter, ie:year 
+temp_plots<-process_and_plot("enso")
+
+
+
+
+
+
+```
+
+```{r}
+
+# adjust this border_value for different legends scale
+
+  legend_temp <- 
+  ggplot(df, aes(x, y, fill = coef)) +
+  geom_tile() +
+  scale_fill_gradientn(
+            limits = c(-border_value, border_value),
+            colours = c(
+              "#002c64",
+              "#0065b0",
+              "#0096c7",
+              "#70b6cc",
+              "#f8f8f8",
+              "#ffa881",
+              "#f55f4c",
+              "#cf1128",
+              "#7a001a"
+            ),
+            values = color_scale,
+            guide = "colourbar"
+          )+guides(fill = guide_colorbar(title = "Coefficient", 
+                                         title.position = "left",
+                                         title.vjust = 0.65,
+                                         title.theme = element_text(size = 15)))+
+    theme(
+    legend.position = "bottom",
+    legend.key.height = unit(1.2, 'cm'),
+    legend.key.width = unit(9.5, "cm"),
+    legend.text = element_text(size = 15)
+  )
+  
+gt <- ggplotGrob(legend_temp)
+legend<- gtable_filter(gt, "guide-box")
+
+combined_plot <- plot_grid(plotlist = temp_plots, 
+                           align = 'hv', nrow = 3, ncol = 5)
+final_plot <- plot_grid(
+    combined_plot, 
+    legend,          
+    nrow = 2,       
+    rel_heights = c(1.5, 0.2))+
+    theme(plot.margin = unit(c(0.8, 0.2, 0.8, 0.2), "cm"))
+
+
+ggsave("f7_low_new.pdf", final_plot, width = 25, height = 11, device = "pdf",limitsize = FALSE)
+
+
+```
+
+
+
