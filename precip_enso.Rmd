@@ -69,10 +69,6 @@ tpe_precip_fall <- tpe_precip %>% filter(season == 4)
 
 ```
 
-```{r}
-
- 
-```
 
 ```{r}
 library(car)
@@ -165,13 +161,7 @@ theta_CI(X,Y,TRUE,0.9)
 
 ```
 
-```{r}
 
-
-
-
-
-```
 
 
 ```{r}
@@ -425,11 +415,6 @@ ggsave("figure9(upper).pdf", final_plot, width = 25, height = 11, device = "pdf"
 ```
 
 
-```{r}
-
-  
- 
-```
 
 
 
@@ -467,18 +452,7 @@ tpe_precip_779|>
 
 
  
-```
 
-```{r}
-
-
-
-
-```
-
-```{r}
-
-```
 
 
 
